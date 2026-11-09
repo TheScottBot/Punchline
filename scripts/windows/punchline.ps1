@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-  Install, uninstall and manage start-at-login for Disciplinary Close-Up (Punchline) on Windows.
+  Install, uninstall and manage start-at-login for Punchline on Windows.
 
 .DESCRIPTION
   Per-user only; never needs administrator rights. Every action is idempotent.

@@ -1,4 +1,4 @@
-// Command punchline is Disciplinary Close-Up: keyboard-triggered webcam zoom
+// Command punchline is Punchline: keyboard-triggered webcam zoom
 // from the tray. This file only wires the packages together.
 package main
 

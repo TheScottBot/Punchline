@@ -1,6 +1,6 @@
 # Plan and status
 
-Spec: Disciplinary Close-Up v0.5. Development started on Windows; macOS second.
+Spec: Disciplinary Close-Up v0.5 (the app is named **Punchline**). Development started on Windows; macOS second.
 
 Spec correction: the primary camera is the **Anker PowerConf C200** (291a:3369),
 not the Logitech StreamCam. The StreamCam adapter is kept but has not been
@@ -10,7 +10,7 @@ tested on hardware. Insta360 Link 2 Pro remains the second camera.
 
 | Topic | Decision |
 |---|---|
-| Module | `github.com/thescottbot/punchline`; binary `punchline`; display name "Disciplinary Close-Up" |
+| Module | `github.com/thescottbot/punchline`; binary `punchline`; display name "Punchline" (renamed from the spec's "Disciplinary Close-Up", user decision 2026-11-09) |
 | Targets | Windows amd64 + arm64; macOS Apple Silicon only (no Intel) |
 | Windows camera control | DirectShow `IAMCameraControl` (`CameraControl_Zoom`) through the in-box UVC driver, pure Go COM, no CGo. All COM on one locked OS thread. |
 | Device identity | `adapter:vvvv:pppp:SERIAL` (Windows: from the parent USB device's instance ID; macOS: the `USB Serial Number` property). A camera without a serial is `adapter:vvvv:pppp`, so it survives a port change; the port is added only while two identical serial-less cameras are connected. |
@@ -58,7 +58,7 @@ tested on hardware. Insta360 Link 2 Pro remains the second camera.
 - **Device changes (done):** IOKit first-match / terminated notifications for `IOUSBHostDevice`, debounced 700 ms, plus the 10 s fallback poll.
 - **Start at login (done in app):** LaunchAgent `~/Library/LaunchAgents/com.thescottbot.punchline.plist` (`RunAtLoad`, `ProcessType Interactive`, `LimitLoadToSessionType Aqua`). The menu toggle writes / deletes it and never boots out the running job. Refused from temporary builds (`$TMPDIR`, `/tmp`, `go-build`).
 - **Logout / restart:** `applicationShouldTerminate:` runs the same shutdown.
-- **Bundle (done, `scripts/macos/punchline.sh`):** `~/Applications/Disciplinary Close-Up.app`, built into a temporary folder, ad-hoc signed, then swapped in after the running instance quits. `LSUIElement`, bundle ID `com.thescottbot.punchline`, arm64 only. With no TCC permissions in use, ad-hoc signing's changing code identity doesn't matter. App icon: `cmd/mkicon` draws the menu bar magnifier (armed style) inset in Apple's icon grid (824 px tile on a 1024 canvas) via `icon.AppIcon`, and the script turns it into `Contents/Resources/AppIcon.icns` with `iconutil` (`CFBundleIconFile`). One drawing, two uses.
+- **Bundle (done, `scripts/macos/punchline.sh`):** `~/Applications/Punchline.app` (the script removes a bundle left under the old name), built into a temporary folder, ad-hoc signed, then swapped in after the running instance quits. `LSUIElement`, bundle ID `com.thescottbot.punchline`, arm64 only. With no TCC permissions in use, ad-hoc signing's changing code identity doesn't matter. App icon: `cmd/mkicon` draws the menu bar magnifier (armed style) inset in Apple's icon grid (824 px tile on a 1024 canvas) via `icon.AppIcon`, and the script turns it into `Contents/Resources/AppIcon.icns` with `iconutil` (`CFBundleIconFile`). One drawing, two uses.
 - **Uninstall (done):** `punchline -quit` (forced after 5 s); remove the plist; `launchctl bootout` the job if loaded; remove the bundle and `~/Library/Application Support/Punchline` (kept with `--keep-settings`). No `tccutil` step needed. `disable-startup` only removes the plist and never boots out the job, which would kill the running app. A test checks that the script's plist matches the app's byte for byte.
 - **Known gap:** switching the item off in System Settings > Login Items leaves the plist in place, so the menu still shows Start at Login as on. Reading that Background Task Management state needs admin (`sfltool`), so it isn't reflected.
 

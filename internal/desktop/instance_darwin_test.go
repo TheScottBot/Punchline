@@ -65,7 +65,7 @@ func TestSignalRunning(t *testing.T) {
 func TestStartupToggleWritesAndRemovesLaunchAgent(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
-	exe := "/Users/someone/Applications/Disciplinary Close-Up.app/Contents/MacOS/punchline"
+	exe := "/Users/someone/Applications/Punchline.app/Contents/MacOS/punchline"
 	if st := startupState(exe); st.Enabled || !st.Available {
 		t.Fatalf("initial %+v", st)
 	}

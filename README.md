@@ -1,4 +1,4 @@
-# Disciplinary Close-Up (punchline)
+# Punchline
 
 Keyboard-triggered webcam zoom from the system tray, for delivering an
 unannounced close-up during Teams or Discord calls. Press **F14** for the
@@ -48,9 +48,10 @@ scripts/macos/punchline.sh status
 scripts/macos/punchline.sh uninstall           # add --keep-settings to keep settings
 ```
 
-`--from-app path/to/Disciplinary\ Close-Up.app` installs a prebuilt bundle;
+`--from-app path/to/Punchline.app` installs a prebuilt bundle;
 `--no-launch` and `--no-startup` skip those steps. The app goes to
-`~/Applications/Disciplinary Close-Up.app` (ad-hoc signed, no Dock icon); start
+`~/Applications/Punchline.app` (ad-hoc signed, no Dock icon; find it with
+Spotlight or in your home folder's Applications); start
 at login is the LaunchAgent `~/Library/LaunchAgents/com.thescottbot.punchline.plist`,
 the same file the menu's Start at Login toggle manages. The script header lists
 every change made to the system, and `uninstall` reverses all of them.

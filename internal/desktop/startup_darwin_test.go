@@ -13,7 +13,7 @@ func TestIsTemporary(t *testing.T) {
 	if !isTemporary(filepath.Join(os.TempDir(), "go-build123", "b001", "exe", "punchline")) {
 		t.Error("go run build not temporary")
 	}
-	if isTemporary("/Users/x/Applications/Disciplinary Close-Up.app/Contents/MacOS/punchline") {
+	if isTemporary("/Users/x/Applications/Punchline.app/Contents/MacOS/punchline") {
 		t.Error("installed app reported temporary")
 	}
 }
@@ -42,10 +42,10 @@ func TestScriptPlistMatchesApp(t *testing.T) {
 	}
 	body := s[i+len(open):]
 	body = body[:strings.Index(body, "\nEOF\n")+1]
-	exe := "/Users/a&b/Applications/Disciplinary Close-Up.app/Contents/MacOS/punchline"
+	exe := "/Users/a&b/Applications/Punchline.app/Contents/MacOS/punchline"
 	body = strings.NewReplacer(
 		"$LABEL", "com.thescottbot.punchline",
-		`$(xml_escape "$EXE")`, "/Users/a&amp;b/Applications/Disciplinary Close-Up.app/Contents/MacOS/punchline",
+		`$(xml_escape "$EXE")`, "/Users/a&amp;b/Applications/Punchline.app/Contents/MacOS/punchline",
 	).Replace(body)
 	if want := string(launchAgentPlist(exe)); body != want {
 		t.Fatalf("script plist differs from app plist:\n--- script\n%s\n--- app\n%s", body, want)

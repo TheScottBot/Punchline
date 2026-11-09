@@ -3,7 +3,7 @@ package product
 
 const (
 	// DisplayName is shown in the tray, menus and notifications.
-	DisplayName = "Disciplinary Close-Up"
+	DisplayName = "Punchline"
 	// ShortName names folders, registry values and the single-instance lock.
 	ShortName = "Punchline"
 	// ExeName is the executable's base name.

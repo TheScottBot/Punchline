@@ -1,14 +1,16 @@
 #!/bin/bash
 #
-# Install, uninstall and manage start-at-login for Disciplinary Close-Up
-# (Punchline) on macOS (Apple Silicon).
+# Install, uninstall and manage start-at-login for Punchline on macOS
+# (Apple Silicon).
 #
 # Per-user only; never needs administrator rights (no sudo). Every action is
 # idempotent.
 #
 # Changes this script (and the app) can make to the system, all reversed by
 # "uninstall":
-#   1. ~/Applications/Disciplinary Close-Up.app                 (app bundle with its icon, ad-hoc signed)
+#   1. ~/Applications/Punchline.app                             (app bundle with its icon, ad-hoc signed;
+#                                                                an older ~/Applications/Disciplinary
+#                                                                Close-Up.app is removed)
 #   2. ~/Library/LaunchAgents/com.thescottbot.punchline.plist   (start at login)
 #   3. launchd job gui/<uid>/com.thescottbot.punchline          (loaded by launchd at login)
 #   4. ~/Library/Application Support/Punchline/                 (settings.json, punchline.log,
@@ -31,13 +33,16 @@
 #   scripts/macos/punchline.sh uninstall        add --keep-settings to keep settings
 #
 # Install options:
-#   --from-app PATH   install a prebuilt "Disciplinary Close-Up.app" instead of building
+#   --from-app PATH   install a prebuilt "Punchline.app" instead of building
 #   --no-launch       don't start the app now
 #   --no-startup      don't register start at login
 
 set -euo pipefail
 
-NAME="Disciplinary Close-Up"
+NAME="Punchline"
+# The app's name before it was renamed Punchline; install and uninstall
+# remove a bundle left under it.
+LEGACY_APP="$HOME/Applications/Disciplinary Close-Up.app"
 LABEL="com.thescottbot.punchline"
 EXE_NAME="punchline"
 APP="$HOME/Applications/$NAME.app"
@@ -240,11 +245,19 @@ install_app() {
 	rm -rf "$APP"
 	mv "$new" "$APP"
 	say "installed $APP"
+	remove_legacy
 
 	if [ "$no_startup" -eq 1 ]; then disable_startup; else enable_startup; fi
 	if [ "$no_launch" -eq 0 ]; then
 		open "$APP"
 		say "started (look for the magnifier in the menu bar)"
+	fi
+}
+
+remove_legacy() {
+	if [ -d "$LEGACY_APP" ]; then
+		rm -rf "$LEGACY_APP"
+		say "removed $LEGACY_APP (the app's old name)"
 	fi
 }
 
@@ -259,6 +272,7 @@ uninstall_app() {
 		rm -rf "$APP"
 		say "removed $APP"
 	fi
+	remove_legacy
 	if [ "$keep_settings" -eq 1 ]; then
 		say "kept $DATA_DIR"
 	elif [ -d "$DATA_DIR" ]; then
