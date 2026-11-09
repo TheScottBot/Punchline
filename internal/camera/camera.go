@@ -15,12 +15,19 @@ type DeviceInfo struct {
 	Name    string // friendly name for menus
 	Model   string // e.g. "Logitech StreamCam"
 	Adapter string // name of the adapter that found it
+	// Zoom is the model's zoom capability, known at discovery so the menu
+	// can show a camera's levels while it is disconnected. Description may
+	// be empty until the device is opened.
+	Zoom ZoomCapability
 }
 
 // ZoomCapability describes a device's zoom in logical terms.
 type ZoomCapability struct {
 	// MaxMagnification is the largest supported magnification (1 = none).
 	MaxMagnification float64
+	// HalfwayMagnification is the model's intermediate level, or 0 when the
+	// model has none (then the halfway hotkey is not offered).
+	HalfwayMagnification float64
 	// Description is free text for diagnostics, e.g. the raw range.
 	Description string
 }

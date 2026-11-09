@@ -18,6 +18,13 @@ type Model struct {
 	// MaxMagnification is the magnification at the top of the device's raw
 	// zoom range. UVC does not report it, so it is known per model.
 	MaxMagnification float64
+	// HalfwayMagnification is an optional intermediate level (0 = none),
+	// for cameras whose full close-up is too much for some uses.
+	HalfwayMagnification float64
+}
+
+func (m Model) capability() camera.ZoomCapability {
+	return camera.ZoomCapability{MaxMagnification: m.MaxMagnification, HalfwayMagnification: m.HalfwayMagnification}
 }
 
 // Adapter discovers and opens the listed models through a uvc.Backend.
@@ -70,7 +77,7 @@ func (a *Adapter) scan() ([]found, error) {
 		if count[m.Name] > 1 {
 			name = fmt.Sprintf("%s (%d)", m.Name, count[m.Name])
 		}
-		out = append(out, found{n, m, camera.DeviceInfo{ID: a.id(n), Name: name, Model: m.Name, Adapter: a.name}})
+		out = append(out, found{n, m, camera.DeviceInfo{ID: a.id(n), Name: name, Model: m.Name, Adapter: a.name, Zoom: m.capability()}})
 	}
 	return out, nil
 }
@@ -123,11 +130,13 @@ type device struct {
 func (d *device) Info() camera.DeviceInfo { return d.info }
 
 func (d *device) Capability() camera.ZoomCapability {
-	return camera.ZoomCapability{
-		MaxMagnification: d.model.MaxMagnification,
-		Description: fmt.Sprintf("UVC zoom raw %d..%d step %d default %d = 1x..%gx",
-			d.r.Min, d.r.Max, d.r.Step, d.r.Default, d.model.MaxMagnification),
+	c := d.model.capability()
+	c.Description = fmt.Sprintf("UVC zoom raw %d..%d step %d default %d = 1x..%gx",
+		d.r.Min, d.r.Max, d.r.Step, d.r.Default, d.model.MaxMagnification)
+	if c.HalfwayMagnification > 0 {
+		c.Description += fmt.Sprintf(", halfway %gx", c.HalfwayMagnification)
 	}
+	return c
 }
 
 func (d *device) SetMagnification(mag float64) error {

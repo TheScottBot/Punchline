@@ -24,6 +24,7 @@ const module = "github.com/thescottbot/punchline"
 var osPackages = map[string]bool{
 	"internal/desktop": true,
 	"internal/uvc":     true,
+	"internal/midi":    true,
 }
 
 var osImports = []string{"syscall", "unsafe", "C", "golang.org/x/sys"}

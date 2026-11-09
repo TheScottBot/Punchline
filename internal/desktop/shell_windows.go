@@ -29,10 +29,9 @@ const (
 	mutexName      = `Local\Punchline.SingleInstance`
 	trayID         = 1
 	timerDevice    = 1
-	timerCapture   = 2
 	timerUnhook    = 3
+	timerDynamic   = 100 // first ID for timers from After
 	deviceDebounce = 700 * time.Millisecond
-	captureTimeout = 15 * time.Second
 )
 
 // Shell is the Windows desktop integration: a hidden window owning the tray
@@ -44,7 +43,8 @@ type Shell struct {
 	hinst   windows.Handle
 	hwnd    windows.HWND
 	mutex   windows.Handle
-	reg     *winRegistrar
+	hk      *hotkeyTable
+	rb      *rebinder // set in Run
 	core    *app.Core
 	taskbar uint32
 
@@ -56,20 +56,20 @@ type Shell struct {
 
 	wndProc  uintptr
 	hookProc uintptr
-	hook     uintptr
+	hook     uintptr // installed while capturing, and until the captured key's key-up
 	capture  struct {
-		active    bool
-		action    hotkey.Action
-		pressed   uint32
-		finishing bool
+		pressed   uint32 // the captured key, whose key-up is swallowed too
+		finishing bool   // key captured; waiting for its key-up to unhook
 	}
+	timers       map[uintptr]func()
+	nextTimer    uintptr
 	shutdownDone bool
 }
 
 // New claims the single-instance lock and creates the hidden window.
 func New(cfg Config) (*Shell, error) {
 	cfg.defaults()
-	s := &Shell{cfg: cfg, log: cfg.Logger, icons: map[icon.Style]windows.Handle{}}
+	s := &Shell{cfg: cfg, log: cfg.Logger, icons: map[icon.Style]windows.Handle{}, timers: map[uintptr]func(){}}
 
 	m, err := windows.CreateMutex(nil, false, utf16Ptr(mutexName))
 	if err == windows.ERROR_ALREADY_EXISTS {
@@ -117,12 +117,12 @@ func New(cfg Config) (*Shell, error) {
 		return nil, fmt.Errorf("CreateWindowEx: %w", err)
 	}
 	s.hwnd = windows.HWND(hw)
-	s.reg = newRegistrar(s.hwnd)
+	s.hk = newHotkeyTable(winHotkeys{hwnd: s.hwnd}, 0xBFFF) // RegisterHotKey's application ID range
 	return s, nil
 }
 
 // Registrar returns the OS hotkey registrar for the core.
-func (s *Shell) Registrar() app.Registrar { return s.reg }
+func (s *Shell) Registrar() app.Registrar { return s.hk }
 
 // Changed may be called from any goroutine when core state changes.
 func (s *Shell) Changed() {
@@ -135,6 +135,7 @@ func (s *Shell) Changed() {
 // Quit. notices are shown once as a notification (e.g. settings problems).
 func (s *Shell) Run(core *app.Core, notices []string) error {
 	s.core = core
+	s.rb = &rebinder{core: core, ui: hookUI{s}, log: s.log}
 	s.addTray()
 	if err := core.Start(); err != nil {
 		s.notify("Hotkey problem", err.Error(), true)
@@ -203,8 +204,8 @@ func (s *Shell) windowProc(hwnd, m, wp, lp uintptr) (ret uintptr) {
 	}()
 	switch uint32(m) {
 	case wmHotkey:
-		if a, ok := s.reg.action(wp); ok && s.core != nil {
-			s.core.Press(a)
+		if s.core != nil && s.rb != nil {
+			dispatchHotkey(s.hk, s.rb, s.core, uint32(wp))
 		}
 		return 0
 	case wmTrayCallback:
@@ -214,6 +215,9 @@ func (s *Shell) windowProc(hwnd, m, wp, lp uintptr) (ret uintptr) {
 		}
 		return 0
 	case wmStateChanged:
+		if s.core != nil {
+			s.core.SyncHotkeys() // e.g. the selected camera gained or lost a halfway level
+		}
 		s.updateTray()
 		return 0
 	case wmCaptured:
@@ -221,7 +225,7 @@ func (s *Shell) windowProc(hwnd, m, wp, lp uintptr) (ret uintptr) {
 		return 0
 	case wmCaptureKeyUp:
 		if s.capture.finishing {
-			s.stopCapture()
+			s.stopHook()
 		}
 		return 0
 	case wmTimer:
@@ -231,14 +235,13 @@ func (s *Shell) windowProc(hwnd, m, wp, lp uintptr) (ret uintptr) {
 			if s.core != nil {
 				s.core.TriggerRescan()
 			}
-		case timerCapture:
-			if s.capture.active && !s.capture.finishing {
-				s.core.CancelRebind()
-				s.stopCapture()
-				s.notify("Rebind cancelled", "No key was pressed. Bindings are unchanged.", false)
-			}
 		case timerUnhook:
-			s.stopCapture()
+			s.stopHook()
+		default:
+			if f, ok := s.timers[wp]; ok {
+				delete(s.timers, wp)
+				f()
+			}
 		}
 		return 0
 	case wmDeviceChange:
@@ -385,7 +388,7 @@ func (s *Shell) showMenu(x, y int32) {
 	if s.core == nil {
 		return
 	}
-	items := BuildMenu(s.core.Snapshot(), startupState(s.exe), PermissionState{})
+	items := BuildMenu(s.core.Snapshot(), startupState(s.exe), PermissionState{}, MIDIState{}) // MIDI: planned (winmm)
 	var cmds []Command
 	hm := buildNativeMenu(items, &cmds)
 	defer procDestroyMenu.Call(hm)
@@ -439,7 +442,7 @@ func (s *Shell) run(c Command) {
 			s.notify("Hotkey problem", err.Error(), true)
 		}
 	case CmdRebind:
-		s.startCapture(c.Action)
+		s.rb.Start(c.Action)
 	case CmdSelectCamera:
 		s.core.SelectCamera(c.Camera)
 	case CmdToggleStartup:
@@ -459,30 +462,51 @@ func (s *Shell) run(c Command) {
 
 // ---- rebind capture -----------------------------------------------------
 //
-// A temporary low-level keyboard hook captures the next key system-wide, so
-// no window is needed. It swallows the captured key (down and up) so it does
-// not reach the focused application. The hook exists only while capturing.
+// The shared rebinder (rebind.go) runs the flow. The native half is a
+// temporary low-level keyboard hook that captures the next key system-wide,
+// so no window is needed, and swallows it (down and up) so it does not reach
+// the focused application. The hook exists only while capturing.
 
-func (s *Shell) startCapture(a hotkey.Action) {
-	if s.capture.active {
-		return
-	}
+type hookUI struct{ s *Shell }
+
+func (u hookUI) Prompt(title, text string) error {
+	s := u.s
+	s.stopHook()
 	h, _, err := procSetWindowsHookExW.Call(whKeyboardLL, s.hookProc, uintptr(s.hinst), 0)
 	if h == 0 {
-		s.notify("Rebind failed", "Could not capture the keyboard: "+err.Error(), true)
-		return
+		return err
 	}
 	s.hook = h
-	s.capture.active, s.capture.action = true, a
 	s.capture.pressed, s.capture.finishing = 0, false
-	s.core.BeginRebind(a)
-	procSetTimer.Call(uintptr(s.hwnd), timerCapture, uintptr(captureTimeout/time.Millisecond), 0)
-	cur := s.core.Snapshot().Bindings.Get(a)
-	s.notify("Rebind "+a.String(), fmt.Sprintf("Press the new key now (currently %s). Esc cancels.", cur), false)
+	s.notify(title, text, false)
+	return nil
+}
+
+// Result reports the outcome. The hook stays until the captured key's
+// key-up so that is swallowed too; with no key captured it goes now.
+func (u hookUI) Result(title, text string, warn bool) {
+	s := u.s
+	s.notify(title, text, warn)
+	if s.capture.pressed == 0 {
+		s.stopHook()
+	} else {
+		s.capture.finishing = true
+	}
+	s.updateTray()
+}
+
+func (u hookUI) After(d time.Duration, f func()) {
+	s := u.s
+	if s.nextTimer < timerDynamic {
+		s.nextTimer = timerDynamic
+	}
+	s.nextTimer++
+	s.timers[s.nextTimer] = f
+	procSetTimer.Call(uintptr(s.hwnd), s.nextTimer, uintptr(d/time.Millisecond), 0)
 }
 
 func (s *Shell) keyboardProc(code, wp, lp uintptr) uintptr {
-	if int32(code) == hcAction && s.capture.active {
+	if int32(code) == hcAction && s.hook != 0 {
 		k := hookStruct(lp)
 		vk := k.VkCode
 		switch uint32(wp) {
@@ -506,43 +530,33 @@ func (s *Shell) keyboardProc(code, wp, lp uintptr) uintptr {
 }
 
 func (s *Shell) onCaptured(vk uint32) {
-	if !s.capture.active || s.capture.finishing {
+	if s.rb == nil || !s.rb.Active() {
 		return
 	}
-	procKillTimer.Call(uintptr(s.hwnd), timerCapture)
-	s.capture.finishing = true
 	// Safety net: release the hook even if the key-up never arrives.
 	procSetTimer.Call(uintptr(s.hwnd), timerUnhook, 3000, 0)
-	a := s.capture.action
-	old := s.core.Snapshot().Bindings.Get(a)
 	if vk == vkEscape {
-		s.core.CancelRebind()
-		s.notify("Rebind cancelled", fmt.Sprintf("%s stays on %s.", a, old), false)
+		s.rb.Captured(hotkey.Cancel, true, vk)
 		return
 	}
 	k, ok := keyByVK[vk]
-	if !ok {
-		s.core.CancelRebind()
-		s.notify("Key not supported", fmt.Sprintf("That key (code 0x%02X) can't be bound. %s stays on %s.", vk, a, old), true)
-		return
-	}
-	if err := s.core.CompleteRebind(k); err != nil {
-		s.notify("Rebind failed", fmt.Sprintf("%v. %s stays on %s.", err, a, old), true)
-		return
-	}
-	s.notify("Rebound", fmt.Sprintf("%s is now %s.", a, k), false)
+	s.rb.Captured(k, ok, vk)
 }
 
+// stopCapture abandons any rebind (shutdown) and removes the hook.
 func (s *Shell) stopCapture() {
+	if s.rb != nil {
+		s.rb.Abort("shutdown")
+	}
+	s.stopHook()
+}
+
+func (s *Shell) stopHook() {
 	if s.hook != 0 {
 		procUnhookWindowsHookEx.Call(s.hook)
 		s.hook = 0
 	}
-	if s.capture.active && !s.capture.finishing && s.core != nil {
-		s.core.CancelRebind()
-	}
-	procKillTimer.Call(uintptr(s.hwnd), timerCapture)
 	procKillTimer.Call(uintptr(s.hwnd), timerUnhook)
-	s.capture.active, s.capture.finishing, s.capture.pressed = false, false, 0
+	s.capture.finishing, s.capture.pressed = false, 0
 	s.updateTray()
 }

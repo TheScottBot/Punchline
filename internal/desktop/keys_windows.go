@@ -54,56 +54,28 @@ func isModifierVK(vk uint32) bool {
 	return false
 }
 
-// winRegistrar implements app.Registrar with RegisterHotKey. Each
-// registration gets a fresh ID so a replacement can be registered before the
-// old one is released; if registration fails the old one is untouched.
-type winRegistrar struct {
-	hwnd    windows.HWND
-	ids     map[hotkey.Action]uintptr
-	actions map[uintptr]hotkey.Action
-	next    uintptr
-}
+// winHotkeys registers hot keys with RegisterHotKey on the shell's window
+// (no modifiers, MOD_NOREPEAT). The handle is the hot key ID.
+type winHotkeys struct{ hwnd windows.HWND }
 
-func newRegistrar(h windows.HWND) *winRegistrar {
-	return &winRegistrar{hwnd: h, ids: map[hotkey.Action]uintptr{}, actions: map[uintptr]hotkey.Action{}, next: 1}
-}
-
-func (r *winRegistrar) Register(a hotkey.Action, k hotkey.Key) error {
+func (w winHotkeys) register(k hotkey.Key, id uint32) (any, error) {
 	vk, ok := vkByKey[k]
 	if !ok {
-		return fmt.Errorf("%s: %w", k, hotkey.ErrUnsupportedKey)
+		return nil, fmt.Errorf("%s: %w", k, hotkey.ErrUnsupportedKey)
 	}
-	id := r.next
-	r.next++
-	if r.next > 0xBFFF {
-		r.next = 1
-	}
-	ok2, _, err := procRegisterHotKey.Call(uintptr(r.hwnd), id, modNoRepeat, uintptr(vk))
-	if ok2 == 0 {
+	r, _, err := procRegisterHotKey.Call(uintptr(w.hwnd), uintptr(id), modNoRepeat, uintptr(vk))
+	if r == 0 {
 		var en windows.Errno
 		if errors.As(err, &en) && en == errorHotkeyAlreadyRegistered {
-			return fmt.Errorf("%s is in use by another application or reserved by Windows: %w", k, hotkey.ErrUnavailable)
+			return nil, fmt.Errorf("%s is in use by another application or reserved by Windows: %w", k, hotkey.ErrUnavailable)
 		}
-		return fmt.Errorf("%s: %v: %w", k, err, hotkey.ErrUnavailable)
+		return nil, fmt.Errorf("%s: %v: %w", k, err, hotkey.ErrUnavailable)
 	}
-	if old, had := r.ids[a]; had {
-		procUnregisterHotKey.Call(uintptr(r.hwnd), old)
-		delete(r.actions, old)
-	}
-	r.ids[a] = id
-	r.actions[id] = a
-	return nil
+	return id, nil
 }
 
-func (r *winRegistrar) Unregister(a hotkey.Action) {
-	if id, had := r.ids[a]; had {
-		procUnregisterHotKey.Call(uintptr(r.hwnd), id)
-		delete(r.actions, id)
-		delete(r.ids, a)
+func (w winHotkeys) unregister(h any) {
+	if id, ok := h.(uint32); ok {
+		procUnregisterHotKey.Call(uintptr(w.hwnd), uintptr(id))
 	}
-}
-
-func (r *winRegistrar) action(id uintptr) (hotkey.Action, bool) {
-	a, ok := r.actions[id]
-	return a, ok
 }

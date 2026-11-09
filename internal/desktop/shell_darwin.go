@@ -38,6 +38,7 @@ import (
 	"github.com/thescottbot/punchline/internal/app"
 	"github.com/thescottbot/punchline/internal/hotkey"
 	"github.com/thescottbot/punchline/internal/icon"
+	"github.com/thescottbot/punchline/internal/midi"
 	"github.com/thescottbot/punchline/internal/product"
 	"github.com/thescottbot/punchline/internal/settings"
 )
@@ -46,7 +47,6 @@ import (
 func init() { runtime.LockOSThread() }
 
 const (
-	captureTimeout       = 15 * time.Second
 	resultLinger         = 1500 * time.Millisecond
 	deviceDebounce       = 700 * time.Millisecond
 	iconPoints           = 18
@@ -61,17 +61,17 @@ type Shell struct {
 	log  *log.Logger
 	exe  string
 	lock *os.File
+	hk   *hotkeyTable
 	reg  *macRegistrar
+	rb   *rebinder // set in Run
 	core *app.Core
+
+	midi      *midi.Client
+	midiState MIDIState // main thread
 
 	cmds   []Command
 	notice string // shown in the menu until the next menu action
 
-	capture struct {
-		active bool
-		action hotkey.Action
-		gen    int
-	}
 	usbGen int
 
 	iconSet   bool
@@ -142,7 +142,8 @@ func New(cfg Config) (*Shell, error) {
 	if exe, err := os.Executable(); err == nil {
 		s.exe = exe
 	}
-	s.reg = &macRegistrar{s: s, regs: map[hotkey.Action]hotKeyReg{}, byID: map[uint32]hotKeyReg{}}
+	s.hk = newHotkeyTable(carbonHotkeys{}, 1<<31)
+	s.reg = &macRegistrar{s: s}
 	shell = s
 	C.pl_app_init()
 	return s, nil
@@ -152,17 +153,26 @@ func New(cfg Config) (*Shell, error) {
 func (s *Shell) Registrar() app.Registrar { return s.reg }
 
 // Changed may be called from any goroutine when core state changes.
-func (s *Shell) Changed() { s.onMain(func() { s.updateIcon() }, false) }
+func (s *Shell) Changed() {
+	s.onMain(func() {
+		if s.core != nil {
+			s.core.SyncHotkeys() // e.g. the selected camera gained or lost a halfway level
+		}
+		s.updateIcon()
+	}, false)
+}
 
 // Run shows the menu bar item, starts the core and runs the Cocoa event loop
 // until Quit.
 func (s *Shell) Run(core *app.Core, notices []string) error {
 	s.core = core
+	s.rb = &rebinder{core: core, ui: panelUI{s}, log: s.log}
 	s.updateIcon()
 	C.pl_watch_usb()
 	if err := core.Start(); err != nil {
 		s.log.Printf("notice: hotkey problem: %v", err) // the menu shows it too
 	}
+	s.startMIDI()
 	if len(notices) > 0 {
 		s.setNotice("Settings: " + strings.Join(notices, "; "))
 	}
@@ -217,6 +227,10 @@ func (s *Shell) shutdown() {
 	}
 	s.shutdownDone = true
 	s.stopCapture()
+	if s.midi != nil {
+		s.midi.Close()
+		s.midi = nil
+	}
 	if s.core != nil {
 		s.core.Shutdown()
 	}
@@ -357,7 +371,7 @@ func goBuildMenu(menu unsafe.Pointer) {
 	if s == nil || s.core == nil {
 		return
 	}
-	items := BuildMenu(s.core.Snapshot(), startupState(s.exe), PermissionState{})
+	items := BuildMenu(s.core.Snapshot(), startupState(s.exe), PermissionState{}, s.midiState)
 	if s.notice != "" && len(items) >= 2 {
 		items = append(items[:2], append([]Item{label(truncate(s.notice, 90))}, items[2:]...)...)
 	}
@@ -405,7 +419,7 @@ func (s *Shell) run(c Command) {
 			s.setNotice("Hotkey problem: " + err.Error())
 		}
 	case CmdRebind:
-		s.startCapture(c.Action)
+		s.rb.Start(c.Action)
 	case CmdSelectCamera:
 		s.core.SelectCamera(c.Camera)
 	case CmdToggleStartup:
@@ -427,178 +441,147 @@ func (s *Shell) run(c Command) {
 }
 
 // ---- rebind capture -----------------------------------------------------
+//
+// The shared rebinder (rebind.go) runs the flow; the native half is a
+// temporary panel that becomes key and swallows the next key down.
 
-func (s *Shell) startCapture(a hotkey.Action) {
-	if s.capture.active {
-		return
-	}
-	s.capture.active, s.capture.action = true, a
-	s.capture.gen++
-	g := s.capture.gen
-	s.core.BeginRebind(a)
-	cur := s.core.Snapshot().Bindings.Get(a)
-	title := C.CString("Rebind " + a.String())
-	text := C.CString(fmt.Sprintf("Press the new key for %s (currently %s).\nEsc cancels.", a, cur))
-	C.pl_capture_show(title, text)
-	C.free(unsafe.Pointer(title))
-	C.free(unsafe.Pointer(text))
-	s.after(captureTimeout, func() {
-		if s.capture.active && s.capture.gen == g {
-			s.core.CancelRebind()
-			s.finishCapture("No key was pressed. Bindings are unchanged.")
-		}
-	})
+type panelUI struct{ s *Shell }
+
+func (u panelUI) Prompt(title, text string) error {
+	t, x := C.CString(title), C.CString(text)
+	C.pl_capture_show(t, x)
+	C.free(unsafe.Pointer(t))
+	C.free(unsafe.Pointer(x))
+	return nil
 }
 
-// finishCapture ends capture, shows msg briefly, then closes the panel.
-func (s *Shell) finishCapture(msg string) {
-	s.capture.active = false
-	s.log.Printf("rebind: %s", msg)
-	t := C.CString(msg)
-	C.pl_capture_text(t)
-	C.free(unsafe.Pointer(t))
-	g := s.capture.gen
-	s.after(resultLinger, func() {
-		if !s.capture.active && s.capture.gen == g {
+// Result shows the outcome in the panel, then closes it unless another
+// rebind has started meanwhile.
+func (u panelUI) Result(title, text string, warn bool) {
+	x := C.CString(text)
+	C.pl_capture_text(x)
+	C.free(unsafe.Pointer(x))
+	g := u.s.rb.gen
+	u.s.after(resultLinger, func() {
+		if !u.s.rb.Active() && u.s.rb.gen == g {
 			C.pl_capture_close()
 		}
 	})
-	s.updateIcon()
+	u.s.updateIcon()
 }
+
+func (u panelUI) After(d time.Duration, f func()) { u.s.after(d, f) }
 
 //export goCaptureKey
 func goCaptureKey(code C.ushort) {
 	defer guard("capture")
-	if shell != nil {
-		shell.onCaptured(uint16(code))
-	}
-}
-
-func (s *Shell) onCaptured(code uint16) {
-	if !s.capture.active {
+	s := shell
+	if s == nil || s.rb == nil {
 		return
 	}
-	a := s.capture.action
-	old := s.core.Snapshot().Bindings.Get(a)
-	if code == kvkEscape {
-		s.core.CancelRebind()
-		s.finishCapture(fmt.Sprintf("Cancelled. %s stays on %s.", a, old))
+	c := uint16(code)
+	if c == kvkEscape {
+		s.rb.Captured(hotkey.Cancel, true, uint32(c))
 		return
 	}
-	k, ok := keyByCode[code]
-	if !ok {
-		s.core.CancelRebind()
-		s.finishCapture(fmt.Sprintf("That key (code 0x%02X) can't be bound. %s stays on %s.", code, a, old))
-		return
-	}
-	s.completeCapture(k)
-}
-
-func (s *Shell) completeCapture(k hotkey.Key) {
-	a := s.capture.action
-	old := s.core.Snapshot().Bindings.Get(a)
-	if err := s.core.CompleteRebind(k); err != nil {
-		s.finishCapture(fmt.Sprintf("%v.\n%s stays on %s.", err, a, old))
-		return
-	}
-	s.finishCapture(fmt.Sprintf("%s is now %s.", a, k))
+	k, ok := keyByCode[c]
+	s.rb.Captured(k, ok, uint32(c))
 }
 
 //export goCaptureCancel
 func goCaptureCancel() {
 	defer guard("capture cancel")
-	if s := shell; s != nil && s.capture.active {
-		s.log.Printf("rebind: panel closed or lost focus; cancelled")
-		s.stopCapture()
+	if s := shell; s != nil && s.rb != nil && s.rb.Abort("panel closed or lost focus") {
+		C.pl_capture_close()
 	}
 }
 
 func (s *Shell) stopCapture() {
-	if s.capture.active {
-		s.capture.active = false
-		if s.core != nil {
-			s.core.CancelRebind()
-		}
+	if s.rb != nil {
+		s.rb.Abort("shutdown")
 	}
 	C.pl_capture_close()
 }
 
 // ---- hotkeys ------------------------------------------------------------
 
-type hotKeyReg struct {
-	id     uint32
-	ref    unsafe.Pointer
-	action hotkey.Action
-	key    hotkey.Key
-}
+// carbonHotkeys registers Carbon hot keys (main thread only).
+type carbonHotkeys struct{}
 
-// macRegistrar registers Carbon hot keys. All state is touched only on the
-// main thread.
-type macRegistrar struct {
-	s    *Shell
-	next uint32
-	regs map[hotkey.Action]hotKeyReg
-	byID map[uint32]hotKeyReg
-}
-
-func (r *macRegistrar) Register(a hotkey.Action, k hotkey.Key) error {
+func (carbonHotkeys) register(k hotkey.Key, id uint32) (any, error) {
 	code, ok := codeByKey[k]
 	if !ok {
-		return fmt.Errorf("%s is not available on macOS: %w", k, hotkey.ErrUnsupportedKey)
+		return nil, fmt.Errorf("%s is not available on macOS: %w", k, hotkey.ErrUnsupportedKey)
 	}
+	var ref unsafe.Pointer
+	switch st := C.pl_hotkey_register(C.int(code), C.uint32_t(id), &ref); {
+	case st == osStatusHotKeyExists:
+		return nil, fmt.Errorf("%s is held by another application: %w", k, hotkey.ErrUnavailable)
+	case st != 0:
+		return nil, fmt.Errorf("%s: RegisterEventHotKey failed (OSStatus %d): %w", k, int(st), hotkey.ErrUnavailable)
+	}
+	return ref, nil
+}
+
+func (carbonHotkeys) unregister(h any) {
+	if ref, ok := h.(unsafe.Pointer); ok {
+		C.pl_hotkey_unregister(ref)
+	}
+}
+
+// macRegistrar is the core's Registrar: the shared table, always on the main
+// thread.
+type macRegistrar struct{ s *Shell }
+
+func (r *macRegistrar) Register(a hotkey.Action, k hotkey.Key) error {
 	var err error
-	r.s.onMain(func() {
-		if old, ok := r.regs[a]; ok && old.key == k {
-			return
-		}
-		r.next++
-		id := r.next
-		var ref unsafe.Pointer
-		st := C.pl_hotkey_register(C.int(code), C.uint32_t(id), &ref)
-		switch {
-		case st == osStatusHotKeyExists:
-			err = fmt.Errorf("%s is held by another application: %w", k, hotkey.ErrUnavailable)
-			return
-		case st != 0:
-			err = fmt.Errorf("%s: RegisterEventHotKey failed (OSStatus %d): %w", k, int(st), hotkey.ErrUnavailable)
-			return
-		}
-		if old, ok := r.regs[a]; ok {
-			C.pl_hotkey_unregister(old.ref)
-			delete(r.byID, old.id)
-		}
-		n := hotKeyReg{id: id, ref: ref, action: a, key: k}
-		r.regs[a], r.byID[id] = n, n
-	}, true)
+	r.s.onMain(func() { err = r.s.hk.Register(a, k) }, true)
 	return err
 }
 
 func (r *macRegistrar) Unregister(a hotkey.Action) {
-	r.s.onMain(func() {
-		if old, ok := r.regs[a]; ok {
-			C.pl_hotkey_unregister(old.ref)
-			delete(r.byID, old.id)
-			delete(r.regs, a)
-		}
-	}, true)
+	r.s.onMain(func() { r.s.hk.Unregister(a) }, true)
 }
 
 //export goHotkey
 func goHotkey(id C.uint32_t) {
 	defer guard("hotkey")
-	s := shell
-	if s == nil || s.core == nil {
+	if s := shell; s != nil && s.core != nil && s.rb != nil {
+		dispatchHotkey(s.hk, s.rb, s.core, uint32(id))
+	}
+}
+
+// ---- MIDI ---------------------------------------------------------------
+
+// startMIDI listens to every MIDI input (CoreMIDI is multi-client, so RØDE
+// Central or a DAW keeps working). Opened on the main thread so source
+// changes arrive on its run loop. A failure is shown in the menu; keys keep
+// working.
+func (s *Shell) startMIDI() {
+	s.midiState.Supported = true
+	router := midiRouter{
+		core:   s.core,
+		onUI:   func(f func()) { s.onMain(f, false) },
+		rebind: func(k hotkey.Key) { s.rb.Captured(k, true, 0) },
+	}
+	c, err := midi.Open(router.Event, func(ss []midi.Source) {
+		s.onMain(func() { s.setMIDISources(ss) }, false)
+	})
+	if err != nil {
+		s.midiState.Err = err.Error()
+		s.log.Printf("MIDI: %v", err)
 		return
 	}
-	reg, ok := s.reg.byID[uint32(id)]
-	if !ok {
-		return
+	s.midi = c
+	s.rb.midi = true
+	s.setMIDISources(c.Sources())
+}
+
+func (s *Shell) setMIDISources(ss []midi.Source) {
+	names := make([]string, 0, len(ss))
+	for _, x := range ss {
+		names = append(names, x.Name)
 	}
-	if s.capture.active {
-		// A bound key is consumed by its hot key before the capture panel
-		// sees it; treat it as the captured key.
-		s.completeCapture(reg.key)
-		return
-	}
-	s.core.Press(reg.action)
+	s.midiState.Sources = names
+	s.log.Printf("MIDI inputs: %v", names)
 }

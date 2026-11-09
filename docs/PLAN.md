@@ -21,6 +21,10 @@ tested on hardware. Insta360 Link 2 Pro remains the second camera.
 | Windows hotkeys | `RegisterHotKey`, no modifiers, `MOD_NOREPEAT`. A key held by another app is reported as unavailable. Disabled = unregistered. |
 | Rebinding | Temporary `WH_KEYBOARD_LL` hook captures the next key system-wide (no window), swallows it, 15 s timeout, Esc cancels. Register new before releasing old; persist only after registration. |
 | Bindable keys | Any single non-modifier key (user decision: hijacking ordinary keys is accepted). |
+| Zoom levels | Normal and Close-Up on every camera; a third **Halfway** level (default key F15) on models that define one: the Insta360 Link 2 Pro at 2× (user request: 4× is too much for some shots). Not on the PowerConf or StreamCam. The level is part of the model (`uvcadapter.Model.HalfwayMagnification`) and reported at discovery (`DeviceInfo.Zoom`), so the menu shows the right levels even while the camera is disconnected. Settings: `halfwayKey`, `halfwayZoom` (0 = model's level), `cameraZoom[id].halfway`. |
+| Shared shell logic | The rebind flow (`rebinder`) and hot key bookkeeping (`hotkeyTable`, `dispatchHotkey`) live in `internal/desktop/rebind.go`, shared by both shells and unit tested. Each shell supplies only its native parts: macOS a capture panel and Carbon hot keys; Windows a low-level keyboard hook and `RegisterHotKey`. |
+| CI | GitHub Actions on macOS and Windows runners (race tests, vet, builds, script syntax) plus a lint job; see TESTING.md. |
+| Hotkey registration | `Core.SyncHotkeys` registers exactly the keys the selected camera offers. The shells call it on their UI thread from the state-changed handler, because registration is thread-bound on both platforms and the change is detected on the camera monitor goroutine. A key that fails is not retried until bindings, levels or the enabled state change. |
 | Start at login | Windows: HKCU `Run` value; tray toggle and script manage the same value; Task Manager's `StartupApproved` override is honoured and cleared on enable. Refused when running from a temporary build. |
 | Single instance | Named mutex; a second launch notifies the first and exits. `punchline -quit` closes a running instance cleanly. |
 | Device changes | `WM_DEVICECHANGE` (debounced) plus a 10 s fallback poll. |
@@ -34,7 +38,7 @@ tested on hardware. Insta360 Link 2 Pro remains the second camera.
 | 2. Shared core | Done: interfaces, mapping, mock adapter, settings, hotkey model, core with unit tests |
 | 3. Desktop integration | Windows done (tray, menu, hotkeys, rebinding, enable/disable, startup toggle, single instance, logging). macOS done (menu bar, Carbon hotkeys, capture panel, LaunchAgent toggle, single instance, USB notifications); no permissions needed. Hands-on checks pending. |
 | 4. Insta360 Link 2 Pro | Adapter added (`internal/camera/insta360`), standard UVC, no SDK or native dependency. Probed on macOS: USB 2e1a:4c06, zoom 100–400 step 1, every value accepted and read back, command < 1 ms. One readback straight after a set returned kIOReturnAborted; reads now retry once. No USB serial number: ID is `insta360:2e1a:4c06` while it is the only one connected (port added only when two are). Sweep checked visually: smooth zoom across the range, 400 = 4×. To do: test while Teams/Discord streams; test on Windows. |
-| 5. Deployment | Windows script done and tested for idempotency. macOS script pending. |
+| 5. Deployment | Windows and macOS scripts done and tested for idempotency (install twice, startup toggles twice, uninstall twice, reinstall). macOS: login launch from the LaunchAgent still to be confirmed by logging out and back in. |
 | 6. Cross-platform validation | Pending; checklist in TESTING.md |
 
 ## Still to verify on hardware (Windows)
@@ -54,11 +58,13 @@ tested on hardware. Insta360 Link 2 Pro remains the second camera.
 - **Device changes (done):** IOKit first-match / terminated notifications for `IOUSBHostDevice`, debounced 700 ms, plus the 10 s fallback poll.
 - **Start at login (done in app):** LaunchAgent `~/Library/LaunchAgents/com.thescottbot.punchline.plist` (`RunAtLoad`, `ProcessType Interactive`, `LimitLoadToSessionType Aqua`). The menu toggle writes / deletes it and never boots out the running job. Refused from temporary builds (`$TMPDIR`, `/tmp`, `go-build`).
 - **Logout / restart:** `applicationShouldTerminate:` runs the same shutdown.
-- **Bundle (pending, phase 5):** `~/Applications/Disciplinary Close-Up.app`, ad-hoc signed, `LSUIElement`, bundle ID `com.thescottbot.punchline`. With no TCC permissions in use, ad-hoc signing's changing code identity no longer matters.
-- **Uninstall (pending, phase 5):** `punchline -quit`; `launchctl bootout gui/$UID/com.thescottbot.punchline` (ignore not loaded); remove the plist, the app bundle and `~/Library/Application Support/Punchline`. No `tccutil` step needed.
+- **Bundle (done, `scripts/macos/punchline.sh`):** `~/Applications/Disciplinary Close-Up.app`, built into a temporary folder, ad-hoc signed, then swapped in after the running instance quits. `LSUIElement`, bundle ID `com.thescottbot.punchline`, arm64 only. With no TCC permissions in use, ad-hoc signing's changing code identity doesn't matter. No app icon (`.icns`) yet; the menu bar icon is drawn at run time.
+- **Uninstall (done):** `punchline -quit` (forced after 5 s); remove the plist; `launchctl bootout` the job if loaded; remove the bundle and `~/Library/Application Support/Punchline` (kept with `--keep-settings`). No `tccutil` step needed. `disable-startup` only removes the plist and never boots out the job, which would kill the running app. A test checks that the script's plist matches the app's byte for byte.
+- **Known gap:** switching the item off in System Settings > Login Items leaves the plist in place, so the menu still shows Start at Login as on. Reading that Background Task Management state needs admin (`sfltool`), so it isn't reflected.
 
 ### Still to verify on macOS
 
 - Hotkeys while Teams / Discord has focus and is streaming.
 - Whether a VIA/QMK macro pad's F13–F20 register as expected (they should; F21–F24 can't).
 - Unplug / replug of the camera while running.
+- Start at login: log out and back in after installing.

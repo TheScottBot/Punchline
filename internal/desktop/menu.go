@@ -5,6 +5,7 @@ package desktop
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 
 	"github.com/thescottbot/punchline/internal/app"
@@ -73,8 +74,11 @@ func sep() Item { return Item{Kind: KindSeparator} }
 func label(s string) Item { return Item{Kind: KindLabel, Text: s, Disabled: true} }
 
 // BuildMenu returns the tray / menu bar menu for a snapshot.
-func BuildMenu(sn app.Snapshot, st StartupState, perm PermissionState) []Item {
+func BuildMenu(sn app.Snapshot, st StartupState, perm PermissionState, m MIDIState) []Item {
 	items := []Item{label(product.DisplayName), label(CameraLine(sn))}
+	if l := midiLine(sn.Bindings, m); l != "" {
+		items = append(items, label(l))
+	}
 	if perm.Missing {
 		items = append(items, Item{Kind: KindCommand, Text: perm.Text, Cmd: Command{Kind: CmdOpenPermissions}})
 	}
@@ -98,13 +102,14 @@ func BuildMenu(sn app.Snapshot, st StartupState, perm PermissionState) []Item {
 	items = append(items, sep(),
 		Item{Kind: KindCommand, Text: "Hotkeys Enabled", Checked: sn.Enabled,
 			Disabled: sn.Rebinding, Cmd: Command{Kind: CmdToggleHotkeys}})
-	for _, a := range hotkey.Actions {
+	for _, l := range zoomLevels(sn) {
+		a := l.Action
 		if sn.Rebinding && sn.RebindAction == a {
 			items = append(items, label(fmt.Sprintf("%s: press a key now (Esc cancels)", a)))
 			continue
 		}
 		items = append(items, Item{
-			Kind: KindCommand, Text: fmt.Sprintf("Rebind %s (%s)…", a, sn.Bindings.Get(a)),
+			Kind: KindCommand, Text: fmt.Sprintf("Rebind %s%s (%s)…", a, magText(l.Magnification), sn.Bindings.Get(a)),
 			Disabled: sn.Rebinding, Cmd: Command{Kind: CmdRebind, Action: a},
 		})
 	}
@@ -120,6 +125,24 @@ func BuildMenu(sn app.Snapshot, st StartupState, perm PermissionState) []Item {
 		Item{Kind: KindCommand, Text: "Quit", Cmd: Command{Kind: CmdQuit}},
 	)
 	return items
+}
+
+// zoomLevels is the selected camera's zoom actions; before the core reports
+// any, Normal and Close-Up.
+func zoomLevels(sn app.Snapshot) []app.ZoomLevel {
+	if len(sn.Zoom) > 0 {
+		return sn.Zoom
+	}
+	return []app.ZoomLevel{{Action: hotkey.Normal}, {Action: hotkey.CloseUp}}
+}
+
+// magText formats a magnification for the menu: " 2×", " 1.5×", or ""
+// when unknown.
+func magText(m float64) string {
+	if m <= 0 {
+		return ""
+	}
+	return fmt.Sprintf(" %s×", strconv.FormatFloat(m, 'f', -1, 64))
 }
 
 func showChooser(sn app.Snapshot) bool {
@@ -153,7 +176,12 @@ func CameraLine(sn app.Snapshot) string {
 func Tooltip(sn app.Snapshot) string {
 	keys := "Hotkeys disabled"
 	if sn.Enabled {
-		keys = fmt.Sprintf("%s normal · %s close-up", sn.Bindings.Normal, sn.Bindings.CloseUp)
+		var parts []string
+		for _, l := range zoomLevels(sn) {
+			name := map[hotkey.Action]string{hotkey.Normal: "normal", hotkey.Halfway: "halfway", hotkey.CloseUp: "close-up"}[l.Action]
+			parts = append(parts, fmt.Sprintf("%s %s", sn.Bindings.Get(l.Action), name))
+		}
+		keys = strings.Join(parts, " · ")
 	}
 	return truncate(product.DisplayName+"\n"+strings.TrimPrefix(CameraLine(sn), "Camera: ")+"\n"+keys, 127)
 }

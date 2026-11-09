@@ -404,3 +404,184 @@ func TestMonitorTriggerAndShutdownReleases(t *testing.T) {
 		t.Fatal("camera not released")
 	}
 }
+
+func levels(sn Snapshot) map[hotkey.Action]float64 {
+	m := map[hotkey.Action]float64{}
+	for _, l := range sn.Zoom {
+		m[l.Action] = l.Magnification
+	}
+	return m
+}
+
+func TestHalfwayOnlyForCamerasThatHaveIt(t *testing.T) {
+	r := newRig(t, settings.Defaults())
+	r.cam.Add("a", "PowerConf-like", 4)
+	r.cam.Add("b", "Insta360-like", 4)
+	r.cam.SetHalfway("b", 2)
+	r.core.Start()
+	r.core.SelectCamera("a")
+	r.core.Rescan()
+	r.core.SyncHotkeys()
+	if l := levels(r.core.Snapshot()); len(l) != 2 || l[hotkey.Normal] != 1 || l[hotkey.CloseUp] != 4 {
+		t.Fatalf("camera a levels %v", l)
+	}
+	if _, ok := r.reg.get(hotkey.Halfway); ok {
+		t.Fatal("halfway registered for a camera without it")
+	}
+	r.core.Press(hotkey.Halfway) // not offered: ignored
+	r.waitCalls("a", []float64{1})
+
+	r.core.SelectCamera("b")
+	r.core.Rescan()
+	r.core.SyncHotkeys()
+	sn := r.core.Snapshot()
+	if l := levels(sn); len(l) != 3 || l[hotkey.Halfway] != 2 || l[hotkey.CloseUp] != 4 {
+		t.Fatalf("camera b levels %v", l)
+	}
+	if sn.Zoom[1].Action != hotkey.Halfway {
+		t.Fatalf("order %+v", sn.Zoom)
+	}
+	if k, ok := r.reg.get(hotkey.Halfway); !ok || k != "F15" {
+		t.Fatal("halfway not registered for camera b")
+	}
+	r.waitCalls("b", []float64{1})
+	r.core.Press(hotkey.Halfway)
+	r.waitCalls("b", []float64{1, 2})
+
+	r.core.SelectCamera("a")
+	r.core.Rescan()
+	r.core.SyncHotkeys()
+	if _, ok := r.reg.get(hotkey.Halfway); ok {
+		t.Fatal("halfway still registered after switching back")
+	}
+}
+
+func TestHalfwayOverrides(t *testing.T) {
+	s := settings.Defaults()
+	s.HalfwayZoom = 3
+	s.CameraZoom["b"] = settings.ZoomOverride{Halfway: 1.5}
+	r := newRig(t, s)
+	r.cam.Add("b", "Insta360-like", 4)
+	r.cam.SetHalfway("b", 2)
+	r.core.Rescan()
+	if l := levels(r.core.Snapshot()); l[hotkey.Halfway] != 1.5 {
+		t.Fatalf("per-camera override: %v", l)
+	}
+	r.waitCalls("b", []float64{1})
+	r.core.Press(hotkey.Halfway)
+	r.waitCalls("b", []float64{1, 1.5})
+}
+
+func TestHalfwayLevelsKnownWhileDisconnected(t *testing.T) {
+	r := newRig(t, settings.Defaults())
+	r.cam.Add("b", "Insta360-like", 4)
+	r.cam.SetHalfway("b", 2)
+	r.core.Rescan()
+	r.cam.SetPresent("b", false)
+	r.core.Rescan()
+	sn := r.core.Snapshot()
+	if sn.Status != StatusWaiting || levels(sn)[hotkey.Halfway] != 2 {
+		t.Fatalf("%v %v", sn.Status, levels(sn))
+	}
+}
+
+func TestRebindHalfwayWithoutHalfwayCameraOnlyTests(t *testing.T) {
+	r := newRig(t, settings.Defaults())
+	r.cam.Add("a", "PowerConf-like", 4)
+	r.core.Start()
+	r.core.Rescan()
+	r.core.SyncHotkeys()
+	r.core.BeginRebind(hotkey.Halfway)
+	if err := r.core.CompleteRebind("F18"); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := r.reg.get(hotkey.Halfway); ok {
+		t.Fatal("halfway left registered on a camera without it")
+	}
+	if s, _ := r.store.last(); s.HalfwayKey != "F18" {
+		t.Fatalf("not saved: %+v", s)
+	}
+	r.core.BeginRebind(hotkey.Normal)
+	if err := r.core.CompleteRebind("F18"); !errors.Is(err, hotkey.ErrDuplicate) {
+		t.Fatalf("duplicate with halfway accepted: %v", err)
+	}
+}
+
+func TestDisabledRegistersNothingEvenWithHalfway(t *testing.T) {
+	s := settings.Defaults()
+	s.HotkeysEnabled = false
+	r := newRig(t, s)
+	r.cam.Add("b", "Insta360-like", 4)
+	r.cam.SetHalfway("b", 2)
+	r.core.Start()
+	r.core.Rescan()
+	r.core.SyncHotkeys()
+	for _, a := range hotkey.Actions {
+		if _, ok := r.reg.get(a); ok {
+			t.Fatalf("%s registered while disabled", a)
+		}
+	}
+	r.core.SetEnabled(true)
+	if k, _ := r.reg.get(hotkey.Halfway); k != "F15" {
+		t.Fatal("halfway not registered on enable")
+	}
+}
+
+func TestMIDIBindingFreesKeyAndPresses(t *testing.T) {
+	r := newRig(t, settings.Defaults())
+	r.cam.Add("a", "Cam A", 4)
+	r.core.Start()
+	r.core.Rescan()
+	r.core.SyncHotkeys()
+	r.waitCalls("a", []float64{1})
+	r.core.BeginRebind(hotkey.CloseUp)
+	if !r.core.Rebinding() {
+		t.Fatal("Rebinding false")
+	}
+	if err := r.core.CompleteRebind("MIDI CC 1/32"); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := r.reg.get(hotkey.CloseUp); ok {
+		t.Fatal("close-up key still registered after binding MIDI")
+	}
+	if s, _ := r.store.last(); s.CloseUpKey != "MIDI CC 1/32" {
+		t.Fatalf("not saved: %+v", s)
+	}
+	r.core.SyncHotkeys()
+	if _, ok := r.reg.get(hotkey.CloseUp); ok {
+		t.Fatal("sync registered a MIDI-bound action")
+	}
+	if !r.core.PressBinding("MIDI CC 1/32") {
+		t.Fatal("binding not found")
+	}
+	r.waitCalls("a", []float64{1, 4})
+	if r.core.PressBinding("MIDI CC 1/33") {
+		t.Fatal("unbound trigger pressed something")
+	}
+
+	// Back to a key: registered again.
+	r.core.BeginRebind(hotkey.CloseUp)
+	if err := r.core.CompleteRebind("F14"); err != nil {
+		t.Fatal(err)
+	}
+	if k, ok := r.reg.get(hotkey.CloseUp); !ok || k != "F14" {
+		t.Fatal("key not registered after rebinding from MIDI")
+	}
+}
+
+func TestMIDIPressGatedLikeKeys(t *testing.T) {
+	s := settings.Defaults()
+	s.CloseUpKey = "MIDI CC 1/32"
+	r := newRig(t, s)
+	r.cam.Add("a", "Cam A", 4)
+	r.core.Rescan()
+	r.waitCalls("a", []float64{1})
+	r.core.SetEnabled(false)
+	r.core.PressBinding("MIDI CC 1/32")
+	r.core.SetEnabled(true)
+	r.core.BeginRebind(hotkey.Normal)
+	r.core.PressBinding("MIDI CC 1/32") // ignored while rebinding
+	r.core.CancelRebind()
+	time.Sleep(20 * time.Millisecond)
+	r.waitCalls("a", []float64{1})
+}

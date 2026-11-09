@@ -32,6 +32,7 @@ const FileName = "settings.json"
 // "use the global value".
 type ZoomOverride struct {
 	Normal  float64 `json:"normal,omitempty"`
+	Halfway float64 `json:"halfway,omitempty"`
 	CloseUp float64 `json:"closeUp,omitempty"`
 }
 
@@ -40,10 +41,14 @@ type Settings struct {
 	Version         int    `json:"version"`
 	HotkeysEnabled  bool   `json:"hotkeysEnabled"`
 	NormalKey       string `json:"normalKey"`
+	HalfwayKey      string `json:"halfwayKey"`
 	CloseUpKey      string `json:"closeUpKey"`
 	PreferredCamera string `json:"preferredCamera"`
 	// NormalZoom is the normal framing magnification.
 	NormalZoom float64 `json:"normalZoom"`
+	// HalfwayZoom is the halfway magnification; 0 means the camera model's
+	// halfway level. Cameras without one never use the halfway hotkey.
+	HalfwayZoom float64 `json:"halfwayZoom"`
 	// CloseUpZoom is the close-up magnification; 0 means the camera maximum.
 	CloseUpZoom float64 `json:"closeUpZoom"`
 	// CameraZoom holds per-camera overrides keyed by camera ID.
@@ -57,6 +62,7 @@ func Defaults() Settings {
 		Version:        Version,
 		HotkeysEnabled: true,
 		NormalKey:      string(b.Normal),
+		HalfwayKey:     string(b.Halfway),
 		CloseUpKey:     string(b.CloseUp),
 		NormalZoom:     1,
 		CloseUpZoom:    0,
@@ -66,12 +72,12 @@ func Defaults() Settings {
 
 // Bindings returns the hotkey bindings.
 func (s Settings) Bindings() hotkey.Bindings {
-	return hotkey.Bindings{Normal: hotkey.Key(s.NormalKey), CloseUp: hotkey.Key(s.CloseUpKey)}
+	return hotkey.Bindings{Normal: hotkey.Key(s.NormalKey), Halfway: hotkey.Key(s.HalfwayKey), CloseUp: hotkey.Key(s.CloseUpKey)}
 }
 
 // WithBindings returns a copy with the given bindings.
 func (s Settings) WithBindings(b hotkey.Bindings) Settings {
-	s.NormalKey, s.CloseUpKey = string(b.Normal), string(b.CloseUp)
+	s.NormalKey, s.HalfwayKey, s.CloseUpKey = string(b.Normal), string(b.Halfway), string(b.CloseUp)
 	return s
 }
 
@@ -150,6 +156,7 @@ func Load(path string) (s Settings, problems []string, err error) {
 			}
 		},
 		"normalKey":  keyField(&s.NormalKey, "normalKey", bad),
+		"halfwayKey": keyField(&s.HalfwayKey, "halfwayKey", bad),
 		"closeUpKey": keyField(&s.CloseUpKey, "closeUpKey", bad),
 		"preferredCamera": func(r json.RawMessage) {
 			var v string
@@ -167,6 +174,14 @@ func Load(path string) (s Settings, problems []string, err error) {
 			}
 			s.NormalZoom = v
 		},
+		"halfwayZoom": func(r json.RawMessage) {
+			var v float64
+			if json.Unmarshal(r, &v) != nil || !validMag(v, true) {
+				bad("halfwayZoom", fmt.Sprintf("must be 0 (camera's halfway level) or between 1 and %g", MaxMagnification))
+				return
+			}
+			s.HalfwayZoom = v
+		},
 		"closeUpZoom": func(r json.RawMessage) {
 			var v float64
 			if json.Unmarshal(r, &v) != nil || !validMag(v, true) {
@@ -178,11 +193,11 @@ func Load(path string) (s Settings, problems []string, err error) {
 		"cameraZoom": func(r json.RawMessage) {
 			var v map[string]ZoomOverride
 			if json.Unmarshal(r, &v) != nil {
-				bad("cameraZoom", "not an object of {normal, closeUp}")
+				bad("cameraZoom", "not an object of {normal, halfway, closeUp}")
 				return
 			}
 			for id, o := range v {
-				if !validMag(o.Normal, true) || !validMag(o.CloseUp, true) {
+				if !validMag(o.Normal, true) || !validMag(o.Halfway, true) || !validMag(o.CloseUp, true) {
 					problems = append(problems, "cameraZoom: an entry is out of range; entry ignored")
 					delete(v, id)
 				}
@@ -208,9 +223,30 @@ func Load(path string) (s Settings, problems []string, err error) {
 	if s.NormalKey == s.CloseUpKey {
 		problems = append(problems, "normalKey and closeUpKey are the same; using default bindings")
 		d := Defaults()
-		s.NormalKey, s.CloseUpKey = d.NormalKey, d.CloseUpKey
+		s.NormalKey, s.HalfwayKey, s.CloseUpKey = d.NormalKey, d.HalfwayKey, d.CloseUpKey
+	}
+	if s.HalfwayKey == s.NormalKey || s.HalfwayKey == s.CloseUpKey {
+		// Typically a file from before the halfway level whose normal or
+		// close-up key is F15: keep those, move halfway to a free key.
+		problems = append(problems, "halfwayKey clashes with another binding; using a free F-key")
+		s.HalfwayKey = freeKey(s.NormalKey, s.CloseUpKey)
 	}
 	return s, problems, nil
+}
+
+// freeKey returns the first of F15..F24, then F13..F14, not in used.
+func freeKey(used ...string) string {
+	for _, n := range []int{15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 13, 14} {
+		k := fmt.Sprintf("F%d", n)
+		clash := false
+		for _, u := range used {
+			clash = clash || u == k
+		}
+		if !clash {
+			return k
+		}
+	}
+	return Defaults().HalfwayKey
 }
 
 func keyField(dst *string, name string, bad func(string, string)) func(json.RawMessage) {

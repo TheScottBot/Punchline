@@ -25,7 +25,9 @@ import (
 	"github.com/thescottbot/punchline/internal/zoom"
 )
 
-// Registrar registers system-wide hotkeys.
+// Registrar registers system-wide hotkeys. The core calls it only from
+// Start, Shutdown, SetEnabled, CompleteRebind and SyncHotkeys, which the
+// desktop shell calls on its UI thread.
 type Registrar interface {
 	// Register binds key to action, replacing any existing registration for
 	// action. On error the previous registration must remain in effect.
@@ -64,6 +66,8 @@ type Options struct {
 	Settings  settings.Settings
 	Logger    *log.Logger
 	// OnChange is called (from any goroutine) after visible state changes.
+	// The shell must respond by calling SyncHotkeys on its UI thread, then
+	// refreshing its display.
 	OnChange func()
 	// PollInterval is the fallback rescan period; 0 disables polling.
 	PollInterval time.Duration
@@ -74,6 +78,14 @@ type CameraEntry struct {
 	Info     camera.DeviceInfo
 	Present  bool
 	Selected bool
+}
+
+// ZoomLevel is one zoom action the selected camera offers.
+type ZoomLevel struct {
+	Action hotkey.Action
+	// Magnification is the level the action selects, or 0 when the camera
+	// has never been seen (its range is unknown).
+	Magnification float64
 }
 
 // Snapshot is a consistent view of state for the UI.
@@ -88,6 +100,9 @@ type Snapshot struct {
 	Rebinding     bool
 	RebindAction  hotkey.Action
 	HotkeyProblem string
+	// Zoom lists the selected camera's zoom actions in menu order: Normal
+	// and Close-Up always, Halfway when the camera's model has one.
+	Zoom []ZoomLevel
 }
 
 // Core is the application core.
@@ -107,6 +122,12 @@ type Core struct {
 	rebindAction  hotkey.Action
 	hotkeyProblem string
 
+	// regMu guards registered and lastSync. Held across Registrar calls,
+	// which all happen on the shell's UI thread.
+	regMu      sync.Mutex
+	registered map[hotkey.Action]hotkey.Key
+	lastSync   string
+
 	scanMu   sync.Mutex
 	rescanCh chan struct{}
 	stop     chan struct{}
@@ -123,27 +144,24 @@ func New(o Options) *Core {
 	}
 	s := o.Settings.Clone()
 	if s.Bindings().Validate() != nil {
-		d := settings.Defaults()
-		s.NormalKey, s.CloseUpKey = d.NormalKey, d.CloseUpKey
+		s = s.WithBindings(hotkey.DefaultBindings())
 	}
 	return &Core{
-		opts:     o,
-		log:      lg,
-		set:      s,
-		known:    map[camera.DeviceID]camera.DeviceInfo{},
-		rescanCh: make(chan struct{}, 1),
-		stop:     make(chan struct{}),
-		done:     make(chan struct{}),
+		opts:       o,
+		log:        lg,
+		set:        s,
+		registered: map[hotkey.Action]hotkey.Key{},
+		known:      map[camera.DeviceID]camera.DeviceInfo{},
+		rescanCh:   make(chan struct{}, 1),
+		stop:       make(chan struct{}),
+		done:       make(chan struct{}),
 	}
 }
 
 // Start registers hotkeys (if enabled) and starts camera monitoring.
 // It returns hotkey registration problems; the app keeps running regardless.
 func (c *Core) Start() error {
-	var err error
-	if c.Settings().HotkeysEnabled {
-		err = c.registerAll()
-	}
+	err := c.syncHotkeys(true)
 	c.mu.Lock()
 	c.started = true
 	c.mu.Unlock()
@@ -156,17 +174,18 @@ func (c *Core) Shutdown() {
 	c.stopOnce.Do(func() {
 		c.mu.Lock()
 		started := c.started
-		enabled := c.set.HotkeysEnabled
 		c.mu.Unlock()
 		close(c.stop)
 		if started {
 			<-c.done
 		}
-		if enabled {
-			for _, a := range hotkey.Actions {
-				c.opts.Registrar.Unregister(a)
-			}
+		c.regMu.Lock()
+		for a := range c.registered {
+			c.opts.Registrar.Unregister(a)
+			delete(c.registered, a)
 		}
+		c.lastSync = "stopped"
+		c.regMu.Unlock()
 		c.scanMu.Lock()
 		c.mu.Lock()
 		conn := c.conn
@@ -217,7 +236,99 @@ func (c *Core) Snapshot() Snapshot {
 			sn.Cameras = append(sn.Cameras, CameraEntry{Info: info, Selected: true})
 		}
 	}
+	zc := c.selectedZoomLocked()
+	for _, a := range c.offeredLocked(zc) {
+		l := ZoomLevel{Action: a}
+		if zc.MaxMagnification > 0 {
+			l.Magnification = c.targetFor(a, pref, zc)
+		}
+		sn.Zoom = append(sn.Zoom, l)
+	}
 	return sn
+}
+
+// selectedZoomLocked is the selected camera's zoom capability: from the open
+// device, else from discovery, else zero (never seen).
+func (c *Core) selectedZoomLocked() camera.ZoomCapability {
+	pref := camera.DeviceID(c.set.PreferredCamera)
+	if c.conn != nil && c.conn.info.ID == pref {
+		return c.conn.cap
+	}
+	return c.known[pref].Zoom
+}
+
+// offeredLocked lists the actions a camera with capability zc offers.
+func (c *Core) offeredLocked(zc camera.ZoomCapability) []hotkey.Action {
+	out := make([]hotkey.Action, 0, len(hotkey.Actions))
+	for _, a := range hotkey.Actions {
+		if a != hotkey.Halfway || zc.HalfwayMagnification > 0 {
+			out = append(out, a)
+		}
+	}
+	return out
+}
+
+// SyncHotkeys registers exactly the hotkeys the selected camera offers
+// (none while disabled or rebinding). Call it on the UI thread whenever
+// OnChange fires; it does nothing when nothing relevant changed, so a key
+// that failed to register is not retried until the bindings, the camera's
+// levels or the enabled state change.
+func (c *Core) SyncHotkeys() { c.syncHotkeys(false) }
+
+func (c *Core) syncHotkeys(force bool) error {
+	c.mu.Lock()
+	if c.rebinding {
+		c.mu.Unlock()
+		return nil
+	}
+	b := c.set.Bindings()
+	want := map[hotkey.Action]bool{}
+	if c.set.HotkeysEnabled {
+		for _, a := range c.offeredLocked(c.selectedZoomLocked()) {
+			// MIDI-bound actions need no OS hot key.
+			want[a] = !b.Get(a).IsMIDI()
+		}
+	}
+	c.mu.Unlock()
+
+	sig := fmt.Sprint(b, want)
+	c.regMu.Lock()
+	if c.lastSync == "stopped" || (!force && sig == c.lastSync) {
+		c.regMu.Unlock()
+		return nil
+	}
+	c.lastSync = sig
+	var errs []error
+	for _, a := range hotkey.Actions {
+		k, had := c.registered[a]
+		switch {
+		case want[a] && (!had || k != b.Get(a)):
+			if err := c.opts.Registrar.Register(a, b.Get(a)); err != nil {
+				errs = append(errs, fmt.Errorf("%s (%s): %w", a, b.Get(a), err))
+			} else {
+				c.registered[a] = b.Get(a)
+			}
+		case !want[a] && had:
+			c.opts.Registrar.Unregister(a)
+			delete(c.registered, a)
+		}
+	}
+	c.regMu.Unlock()
+
+	err := errors.Join(errs...)
+	problem := ""
+	if err != nil {
+		problem = err.Error()
+		c.log.Printf("hotkey registration: %v", err)
+	}
+	c.mu.Lock()
+	changed := c.hotkeyProblem != problem
+	c.hotkeyProblem = problem
+	c.mu.Unlock()
+	if changed && !force {
+		c.notify()
+	}
+	return err
 }
 
 // TriggerRescan asks the monitor to rescan soon (e.g. on a device change).
@@ -265,9 +376,37 @@ func (c *Core) Press(a hotkey.Action) {
 		c.log.Printf("%s pressed: no camera (%s)", a, st)
 		return
 	}
+	if a == hotkey.Halfway && conn.cap.HalfwayMagnification == 0 {
+		c.mu.Unlock()
+		c.log.Printf("%s pressed: %s has no halfway level", a, conn.info.Name)
+		return
+	}
 	mag := c.targetLocked(a, conn)
 	c.mu.Unlock()
 	conn.submit(request{action: a, mag: mag, at: at})
+}
+
+// PressBinding presses the action bound to k, for bindings that arrive
+// without an OS hot key (MIDI triggers). Safe from any goroutine and never
+// blocks on the camera. It reports whether an action is bound to k.
+func (c *Core) PressBinding(k hotkey.Key) bool {
+	c.mu.Lock()
+	b := c.set.Bindings()
+	c.mu.Unlock()
+	for _, a := range hotkey.Actions {
+		if b.Get(a) == k {
+			c.Press(a)
+			return true
+		}
+	}
+	return false
+}
+
+// Rebinding reports whether a rebind is in progress. Safe from any goroutine.
+func (c *Core) Rebinding() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.rebinding
 }
 
 // Target returns the magnification an action selects on the current camera.
@@ -281,10 +420,27 @@ func (c *Core) Target(a hotkey.Action) (float64, bool) {
 }
 
 func (c *Core) targetLocked(a hotkey.Action, conn *connection) float64 {
-	ov := c.set.CameraZoom[string(conn.info.ID)]
-	maxMag := conn.cap.MaxMagnification
+	return c.targetFor(a, conn.info.ID, conn.cap)
+}
+
+// targetFor resolves an action's magnification for camera id: per-camera
+// override, else the global setting, else the camera's own level.
+func (c *Core) targetFor(a hotkey.Action, id camera.DeviceID, zc camera.ZoomCapability) float64 {
+	ov := c.set.CameraZoom[string(id)]
+	maxMag := zc.MaxMagnification
 	var m float64
 	switch a {
+	case hotkey.Halfway:
+		m = c.set.HalfwayZoom
+		if ov.Halfway > 0 {
+			m = ov.Halfway
+		}
+		if m == 0 {
+			m = zc.HalfwayMagnification
+		}
+		if m == 0 {
+			m = 1
+		}
 	case hotkey.CloseUp:
 		m = c.set.CloseUpZoom
 		if ov.CloseUp > 0 {
@@ -320,44 +476,14 @@ func (c *Core) SelectCamera(id camera.DeviceID) {
 
 // SetEnabled enables or disables both hotkeys and persists the choice.
 func (c *Core) SetEnabled(on bool) error {
-	var err error
-	if on {
-		err = c.registerAll()
-	} else {
-		for _, a := range hotkey.Actions {
-			c.opts.Registrar.Unregister(a)
-		}
-		c.mu.Lock()
-		c.hotkeyProblem = ""
-		c.mu.Unlock()
-	}
 	c.mu.Lock()
 	c.set.HotkeysEnabled = on
 	s := c.set.Clone()
 	c.mu.Unlock()
+	err := c.syncHotkeys(true)
 	c.log.Printf("hotkeys enabled=%v", on)
 	c.save(s)
 	c.notify()
-	return err
-}
-
-func (c *Core) registerAll() error {
-	b := c.Settings().Bindings()
-	var errs []error
-	for _, a := range hotkey.Actions {
-		if err := c.opts.Registrar.Register(a, b.Get(a)); err != nil {
-			errs = append(errs, fmt.Errorf("%s (%s): %w", a, b.Get(a), err))
-		}
-	}
-	err := errors.Join(errs...)
-	c.mu.Lock()
-	if err != nil {
-		c.hotkeyProblem = err.Error()
-		c.log.Printf("hotkey registration: %v", err)
-	} else {
-		c.hotkeyProblem = ""
-	}
-	c.mu.Unlock()
 	return err
 }
 
@@ -401,13 +527,40 @@ func (c *Core) CompleteRebind(k hotkey.Key) error {
 	if b.Get(a) == k {
 		return nil
 	}
+	c.regMu.Lock()
+	if k.IsMIDI() {
+		// A MIDI trigger needs no registration; release the action's key.
+		if _, had := c.registered[a]; had {
+			c.opts.Registrar.Unregister(a)
+			delete(c.registered, a)
+		}
+		c.regMu.Unlock()
+		c.mu.Lock()
+		c.set = c.set.WithBindings(b.With(a, k))
+		s := c.set.Clone()
+		c.mu.Unlock()
+		c.log.Printf("rebound %s: %s -> %s", a, b.Get(a), k)
+		c.save(s)
+		return nil
+	}
 	if err := c.opts.Registrar.Register(a, k); err != nil {
+		c.regMu.Unlock()
 		c.log.Printf("rebind %s to %s failed: %v", a, k, err)
 		return fmt.Errorf("%s: %w", k, err)
 	}
-	if !enabled {
-		c.opts.Registrar.Unregister(a)
+	c.registered[a] = k
+	c.mu.Lock()
+	offered := false
+	for _, o := range c.offeredLocked(c.selectedZoomLocked()) {
+		offered = offered || o == a
 	}
+	c.mu.Unlock()
+	if !enabled || !offered {
+		// Registration was only a test that the key is free.
+		c.opts.Registrar.Unregister(a)
+		delete(c.registered, a)
+	}
+	c.regMu.Unlock()
 	c.mu.Lock()
 	c.set = c.set.WithBindings(b.With(a, k))
 	s := c.set.Clone()

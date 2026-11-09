@@ -1,0 +1,76 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: test (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        # The two supported platforms. macos-latest is Apple Silicon, the only
+        # macOS target; the macOS packages need CGo (IOKit, Cocoa, Carbon).
+        os: [macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    env:
+      CGO_ENABLED: "1" # the race detector needs CGo on both platforms
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: vet
+        run: go vet ./...
+      - name: test (race)
+        run: go test -race -count=1 ./...
+      - name: build
+        run: go build ./cmd/...
+      - name: install script syntax (macOS)
+        if: runner.os == 'macOS'
+        run: bash -n scripts/macos/punchline.sh
+      - name: install script syntax (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $errors = $null
+          [System.Management.Automation.Language.Parser]::ParseFile(
+            "$PWD/scripts/windows/punchline.ps1", [ref]$null, [ref]$errors) | Out-Null
+          if ($errors) { $errors | ForEach-Object { Write-Error $_.ToString() }; exit 1 }
+
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: gofmt
+        run: |
+          unformatted="$(gofmt -l .)"
+          if [ -n "$unformatted" ]; then
+            echo "Not gofmt-formatted:"; echo "$unformatted"; exit 1
+          fi
+      - name: go mod tidy
+        run: |
+          go mod tidy
+          git diff --exit-code go.mod go.sum
+      - name: shellcheck
+        run: shellcheck -S warning scripts/macos/punchline.sh
+      - name: cross-build Windows (amd64, arm64; no CGo, as the install script builds)
+        env:
+          GOOS: windows
+          CGO_ENABLED: "0"
+        run: |
+          GOARCH=amd64 go vet ./...
+          GOARCH=amd64 go build ./cmd/...
+          GOARCH=arm64 go build ./cmd/...

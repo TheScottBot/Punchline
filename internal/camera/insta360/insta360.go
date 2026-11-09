@@ -16,12 +16,14 @@ import (
 // and read back, and a command completes in under 1 ms. A visual sweep
 // confirmed a smooth zoom with 400 = 4x. The camera reports
 // no USB serial number, so its ID is port-independent only while it is the
-// only Link 2 Pro connected (see uvc.Node.StableID).
+// only Link 2 Pro connected (see uvc.Node.StableID). Its 4x close-up is too
+// much for some shots, so it also offers a 2x halfway level.
 var Link2Pro = uvcadapter.Model{
-	Name:             "Insta360 Link 2 Pro",
-	VendorID:         0x2e1a,
-	ProductID:        0x4c06,
-	MaxMagnification: 4,
+	Name:                 "Insta360 Link 2 Pro",
+	VendorID:             0x2e1a,
+	ProductID:            0x4c06,
+	MaxMagnification:     4,
+	HalfwayMagnification: 2,
 }
 
 // New returns the Insta360 adapter.

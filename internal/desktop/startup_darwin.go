@@ -91,17 +91,27 @@ func launchAgentPlist(exe string) []byte {
 // isTemporary reports whether exe lives somewhere that will be deleted, such
 // as a `go run` build folder. Startup must never point there.
 func isTemporary(exe string) bool {
-	clean := func(p string) string {
+	// Compare both the literal and the symlink-resolved forms: /tmp is a
+	// link to /private/tmp, and a path that no longer exists can't be
+	// resolved.
+	forms := func(p string) []string {
+		out := []string{filepath.Clean(p)}
 		if r, err := filepath.EvalSymlinks(p); err == nil {
-			p = r
+			out = append(out, filepath.Clean(r))
 		}
-		return filepath.Clean(p)
+		return out
 	}
-	e := clean(exe)
-	for _, dir := range []string{os.TempDir(), "/tmp", "/private/tmp", "/var/tmp"} {
-		if strings.HasPrefix(e, clean(dir)+"/") {
+	for _, e := range forms(exe) {
+		if strings.Contains(e, "/go-build") {
 			return true
 		}
+		for _, dir := range []string{os.TempDir(), "/tmp", "/private/tmp", "/var/tmp"} {
+			for _, d := range forms(dir) {
+				if strings.HasPrefix(e, d+"/") {
+					return true
+				}
+			}
+		}
 	}
-	return strings.Contains(e, "/go-build")
+	return false
 }

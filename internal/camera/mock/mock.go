@@ -45,11 +45,18 @@ func (a *Adapter) Add(id, name string, maxMag float64) {
 		a.order = append(a.order, did)
 	}
 	a.devices[did] = &state{
-		info:    camera.DeviceInfo{ID: did, Name: name, Model: name, Adapter: a.name},
+		info:    camera.DeviceInfo{ID: did, Name: name, Model: name, Adapter: a.name, Zoom: camera.ZoomCapability{MaxMagnification: maxMag}},
 		maxMag:  maxMag,
 		present: true,
 		current: 1,
 	}
+}
+
+// SetHalfway gives a camera a halfway level (0 removes it).
+func (a *Adapter) SetHalfway(id string, mag float64) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.devices[camera.DeviceID(id)].info.Zoom.HalfwayMagnification = mag
 }
 
 // SetPresent simulates unplugging or replugging a camera.
@@ -129,7 +136,9 @@ type device struct {
 func (d *device) Info() camera.DeviceInfo { return d.s.info }
 
 func (d *device) Capability() camera.ZoomCapability {
-	return camera.ZoomCapability{MaxMagnification: d.s.maxMag, Description: "mock"}
+	c := d.s.info.Zoom
+	c.Description = "mock"
+	return c
 }
 
 func (d *device) SetMagnification(mag float64) error {
