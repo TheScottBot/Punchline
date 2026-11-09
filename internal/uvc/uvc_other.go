@@ -1,9 +1,8 @@
-//go:build !windows
+//go:build !windows && !darwin
 
 package uvc
 
-// System returns the platform backend. The macOS IOKit backend is not yet
-// implemented; see docs/PLAN.md.
+// System returns the platform backend. Only Windows and macOS are supported.
 func System() Backend { return unsupported{} }
 
 type unsupported struct{}

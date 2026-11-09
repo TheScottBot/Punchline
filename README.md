@@ -5,7 +5,7 @@ unannounced close-up during Teams or Discord calls. Press **F14** for the
 close-up, **F13** to return to normal framing. No companion software, no
 window, no network.
 
-Status: Windows implemented; macOS to follow (see [docs/PLAN.md](docs/PLAN.md)).
+Status: Windows implemented. macOS app implemented (menu bar, hotkeys, rebinding, start at login; no permissions needed); install script to follow. See [docs/PLAN.md](docs/PLAN.md).
 
 ## Supported cameras
 
@@ -13,7 +13,7 @@ Status: Windows implemented; macOS to follow (see [docs/PLAN.md](docs/PLAN.md)).
 |---|---|---|---|
 | Anker PowerConf C200 | 291a:3369 | standard UVC | 1×–4× (raw 100–400; magnification to be confirmed) |
 | Logitech StreamCam | 046d:0893 | standard UVC | 1×–2× (not yet tested on hardware) |
-| Insta360 Link 2 Pro | — | planned (phase 4) | 1×–4× expected |
+| Insta360 Link 2 Pro | 2e1a:4c06 | standard UVC (no SDK) | 1×–4× (raw 100–400, confirmed on hardware) |
 
 ## Install (Windows)
 
@@ -54,6 +54,10 @@ the taskbar to keep it visible.
 Any single key without modifiers can be bound (F1–F24, letters, digits, numpad,
 navigation, punctuation, media keys). Binding an ordinary key takes it away from
 every other application while hotkeys are enabled; F13–F24 avoid that.
+On macOS the limit is F20 (the OS has no key codes for F21–F24), and Print
+Screen, Scroll Lock, Pause and media/volume keys can't be bound. Rebinding on
+macOS shows a small "press a key" panel. The Mac app needs no Input Monitoring,
+Accessibility or camera permission.
 
 ## Settings
 
@@ -96,12 +100,12 @@ go run ./cmd/uvcprobe -device anker -sweep  # pick by name (or list number) when
 | `cmd/punchline` | entry point, wiring only |
 | `cmd/uvcprobe` | hardware diagnostic |
 | `internal/app` | application core: selection, reconnection, zoom dispatch, hotkeys, rebinding |
-| `internal/camera` | the camera interface; `mock`, `uvcadapter`, `powerconf`, `streamcam` implement it |
-| `internal/uvc` | native UVC zoom access (Windows: DirectShow `IAMCameraControl`, pure Go) |
+| `internal/camera` | the camera interface; `mock`, `uvcadapter`, `powerconf`, `streamcam`, `insta360` implement it |
+| `internal/uvc` | native UVC zoom access (Windows: DirectShow `IAMCameraControl`, pure Go; macOS: IOKit USB class requests via CGo) |
 | `internal/zoom` | magnification ↔ raw value mapping |
 | `internal/hotkey` | key names, actions, binding validation |
 | `internal/settings` | settings file: defaults, validation, atomic save |
-| `internal/desktop` | tray/menu bar, hotkey registration, key capture, startup; the only GUI/OS shell code |
+| `internal/desktop` | tray/menu bar, hotkey registration, key capture, startup; the only GUI/OS shell code (Windows: Win32 in pure Go; macOS: Cocoa + Carbon hot keys via CGo) |
 | `internal/icon` | tray icon drawn into a pixel buffer |
 | `internal/eventlog` | capped local log |
 | `internal/repocheck` | enforces package boundaries and no network imports |

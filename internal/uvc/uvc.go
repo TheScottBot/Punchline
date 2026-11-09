@@ -52,6 +52,35 @@ var (
 	ErrClosed              = errors.New("uvc: control closed")
 )
 
+// portless gives cameras without a USB serial number (such as the Insta360
+// Link 2 Pro) an identity that survives moving them to another port. Their
+// StableID is "vvvv:pppp@<port>[#iface]"; when no other connected device
+// shares that USB ID, the port part is dropped. With two identical
+// serial-less cameras the port is kept so they can be told apart.
+func portless(nodes []Node) {
+	key := func(n Node) (string, bool) {
+		head, tail, _ := strings.Cut(n.StableID, "#")
+		if !strings.HasPrefix(head, n.USBID()+"@") {
+			return "", false
+		}
+		if tail != "" {
+			tail = "#" + tail
+		}
+		return n.USBID() + tail, true
+	}
+	count := map[string]int{}
+	for _, n := range nodes {
+		if k, ok := key(n); ok {
+			count[k]++
+		}
+	}
+	for i, n := range nodes {
+		if k, ok := key(n); ok && count[k] == 1 {
+			nodes[i].StableID = k
+		}
+	}
+}
+
 // parseUSBIDs extracts vid_xxxx and pid_xxxx from a device path or instance
 // ID, case-insensitively.
 func parseUSBIDs(s string) (vid, pid uint16, ok bool) {

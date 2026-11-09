@@ -163,6 +163,7 @@ func (dshow) Enumerate() ([]Node, error) {
 			return false
 		})
 	})
+	portless(nodes)
 	return nodes, err
 }
 
