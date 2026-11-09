@@ -156,6 +156,7 @@ go run ./cmd/uvcprobe -device anker -sweep  # pick by name (or list number) when
 | `cmd/punchline` | entry point, wiring only |
 | `cmd/uvcprobe` | hardware diagnostic |
 | `cmd/midiprobe` | MIDI diagnostic (macOS for now) |
+| `cmd/mkicon` | writes the macOS app icon set from `internal/icon` (used by the install script) |
 | `internal/midi` | MIDI input (macOS CoreMIDI via CGo) and message decoding; groundwork for MIDI triggers, see [docs/MIDI.md](docs/MIDI.md) |
 | `internal/app` | application core: selection, reconnection, zoom dispatch, hotkeys, rebinding |
 | `internal/camera` | the camera interface; `mock`, `uvcadapter`, `powerconf`, `streamcam`, `insta360` implement it |

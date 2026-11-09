@@ -50,7 +50,10 @@ func Render(size int, st Style) []byte {
 	rad := 0.19 * s
 	ring := math.Max(1.3, 0.08*s)
 	handle := math.Max(1.7, 0.11*s)
-	hx0, hy0 := cx+rad*0.7071, cy+rad*0.7071
+	// The handle starts half its width outside the ring's centre line, so its
+	// rounded end reaches the ring but never crosses into the lens.
+	hstart := rad + handle/2
+	hx0, hy0 := cx+hstart*0.7071, cy+hstart*0.7071
 	hx1, hy1 := 0.73*s, 0.73*s
 
 	const ss = 4

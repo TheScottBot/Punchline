@@ -8,7 +8,7 @@
 #
 # Changes this script (and the app) can make to the system, all reversed by
 # "uninstall":
-#   1. ~/Applications/Disciplinary Close-Up.app                 (app bundle, ad-hoc signed)
+#   1. ~/Applications/Disciplinary Close-Up.app                 (app bundle with its icon, ad-hoc signed)
 #   2. ~/Library/LaunchAgents/com.thescottbot.punchline.plist   (start at login)
 #   3. launchd job gui/<uid>/com.thescottbot.punchline          (loaded by launchd at login)
 #   4. ~/Library/Application Support/Punchline/                 (settings.json, punchline.log,
@@ -172,6 +172,15 @@ build_binary() {
 	printf '%s' "$ver"
 }
 
+# build_icon writes the app icon (the menu bar magnifier, drawn by
+# internal/icon via cmd/mkicon) into the bundle's Resources.
+build_icon() {
+	local resources="$1"
+	mkdir -p "$resources"
+	(cd "$REPO_ROOT" && go run ./cmd/mkicon -out "$STAGING/AppIcon.iconset") || die "mkicon failed"
+	iconutil -c icns -o "$resources/AppIcon.icns" "$STAGING/AppIcon.iconset" || die "iconutil failed"
+}
+
 write_info_plist() {
 	local contents="$1" ver="$2"
 	cat > "$contents/Info.plist" <<EOF
@@ -189,6 +198,8 @@ write_info_plist() {
 	<string>$NAME</string>
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
+	<key>CFBundleIconFile</key>
+	<string>AppIcon</string>
 	<key>CFBundleShortVersionString</key>
 	<string>$(xml_escape "$ver")</string>
 	<key>CFBundleVersion</key>
@@ -218,6 +229,7 @@ install_app() {
 		mkdir -p "$new/Contents/MacOS"
 		local ver
 		ver="$(build_binary "$new/Contents/MacOS/$EXE_NAME")"
+		build_icon "$new/Contents/Resources"
 		write_info_plist "$new/Contents" "$ver"
 		codesign --force --sign - --timestamp=none "$new" >/dev/null 2>&1 || die "codesign failed"
 		say "bundled and ad-hoc signed"
