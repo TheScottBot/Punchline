@@ -69,4 +69,4 @@ while the camera is streaming.
 | 15 | Start at Login off (tray or script) is respected | | plist removal verified; login check pending |
 | 16 | Desktop isolated from camera / app logic (`internal/repocheck`) | auto | auto |
 | 17 | Halfway (not in spec): Insta360 menu shows 3 levels and F15 = 2×; PowerConf menu shows 2 and F15 reaches other apps | | |
-| 18 | MIDI (not in spec): Rebind a level to a RØDECaster pad, the pad zooms, the old key reaches other apps, a knob turned during Rebind is ignored | n/a (planned) | |
+| 18 | MIDI (not in spec): Rebind a level to a RØDECaster pad, the pad zooms, the old key reaches other apps, a knob turned during Rebind is ignored | n/a (planned) | pass (pad binding and zoom, incl. rapid alternating 1×/4× presses) |
